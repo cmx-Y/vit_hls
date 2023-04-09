@@ -3,16 +3,20 @@
 
 #define PI 3.1415926
 #define D_MODLE 10
-#define INPUT_NUM 20
+#define INPUT_NUM 4
+#define HEADS 2
+#define DIM_HEAD 3
+
+
 #define MLP_NUM 2
 #define MLP_IN_FEATURES 4
 #define MLP_HIDDEN_DIM 3
-#define MLP_OUT_FEATURES 2
+#define MLP_OUT_FEATURES 4
 
-#define MSA_NUM 2
-#define MSA_IN_FEATURES 4
-#define MSA_W_DIM 3
-#define MSA_OUT_FEATURES 2
+#define MSA_NUM 4
+#define MSA_IN_FEATURES 3
+#define MSA_W_DIM 6
+#define MSA_OUT_FEATURES 4
 
 typedef float data_t;
 

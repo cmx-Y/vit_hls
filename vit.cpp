@@ -31,11 +31,27 @@ void str::print(){
 }
 
 void print_mat(str name, data_t* x, int row, int col){
-	for(int i = 0; i < row; i++)
+	for(int i = 0; i < row; i++){
 		for(int j = 0; j < col; j++){
 			name.print();
-			std::cout << "[" << i << "][" << j <<"]: " << x[i*col + j] << std::endl;
+			std::cout << "[" << i << "][" << j <<"]: " << x[i*col + j] << "   ";
 		}
+		std::cout << std::endl;
+	}
+	std::cout << std::endl;
+}
+
+void print_mat_3d(str name, data_t* x, int dim0, int dim1, int dim2){
+	for(int i = 0; i < dim0; i++)
+		for(int j = 0; j < dim1; j++){
+			for(int k = 0; k < dim2; k++){
+				name.print();
+				std::cout << "[" << i << "][" << j <<"][" << k << "]: " <<
+						x[i*dim1*dim2 + j*dim2 + k] << "   ";
+			}
+			std::cout << std::endl;
+		}
+	std::cout << std::endl;
 }
 
 void LayerNorm::ln(data_t* X_addr, int X_row, int X_col){
@@ -156,12 +172,124 @@ void mlp_test(){
 		}
 }
 
+void nhd2hnd(data_t* nhd_addr, data_t* hnd_addr){
+	int nhd_axis2_stride = 1;
+	int nhd_axis2_size = DIM_HEAD;
+	int nhd_axis1_stride = nhd_axis2_size * nhd_axis2_stride;
+	int nhd_axis1_size = HEADS;
+	int nhd_axis0_stride = nhd_axis1_size * nhd_axis1_stride;
+	int nhd_axis0_size = INPUT_NUM;
+
+	int hnd_axis2_stride = nhd_axis2_stride;
+	int hnd_axis2_size = nhd_axis2_size;
+	int hnd_axis1_stride = nhd_axis0_stride;
+	int hnd_axis1_size = nhd_axis0_size;
+	int hnd_axis0_stride = nhd_axis1_stride;
+	int hnd_axis0_size = nhd_axis1_size;
+
+	for(int i = 0; i < HEADS; i++)
+		for(int j = 0; j < INPUT_NUM; j++)
+			for(int k = 0; k < DIM_HEAD; k++){
+				hnd_addr[i*INPUT_NUM*DIM_HEAD + j*DIM_HEAD + k]
+						 = nhd_addr[i*hnd_axis0_stride + j*hnd_axis1_stride + k];
+			}
+}
+
+void hnd2nhd(data_t* hnd_addr, data_t* nhd_addr){
+	int hnd_axis2_stride = 1;
+	int hnd_axis2_size = DIM_HEAD;
+	int hnd_axis1_stride = hnd_axis2_size * hnd_axis2_stride;
+	int hnd_axis1_size = INPUT_NUM;
+	int hnd_axis0_stride = hnd_axis1_size * hnd_axis1_stride;
+	int hnd_axis0_size = HEADS;
+
+	int nhd_axis2_stride = hnd_axis2_stride;
+	int nhd_axis2_size = hnd_axis2_size;
+	int nhd_axis1_stride = hnd_axis0_stride;
+	int nhd_axis1_size = hnd_axis0_size;
+	int nhd_axis0_stride = hnd_axis1_stride;
+	int nhd_axis0_size = hnd_axis1_size;
+
+	for(int i = 0; i < INPUT_NUM; i++)
+		for(int j = 0; j < HEADS; j++)
+			for(int k = 0; k < DIM_HEAD; k++){
+				nhd_addr[i*HEADS*DIM_HEAD + j*DIM_HEAD + k]
+						= hnd_addr[i*nhd_axis0_stride + j*nhd_axis1_stride + k];
+			}
+}
+
+void increDim(data_t* input_addr, data_t* output_addr){
+	//n (h d) -> n h d
+	int output_axis2_stride = 1;
+	int output_axis1_stride = DIM_HEAD;
+	int output_axis0_stride = HEADS * output_axis1_stride;
+	for(int i = 0; i < INPUT_NUM; i++)
+		for(int j = 0; j < HEADS; j++)
+			for(int k = 0; k < DIM_HEAD; k++){
+				output_addr[i*output_axis0_stride + j*output_axis1_stride + k]
+							= input_addr[i*output_axis0_stride + j*output_axis1_stride + k];
+			}
+}
+
+void decreDim(data_t* input_addr, data_t* output_addr){
+	//n h d -> n (h d)
+
+	for(int i = 0; i < INPUT_NUM; i++)
+		for(int j = 0; j < HEADS; j++)
+			for(int k = 0; k < DIM_HEAD; k++){
+				output_addr[i*HEADS*DIM_HEAD + j*DIM_HEAD + k] = input_addr[i*HEADS*DIM_HEAD + j*DIM_HEAD + k];
+			}
+}
+
+void rearrange_n_hd2hnd(data_t* input_addr, data_t* output_addr){
+	data_t mid[INPUT_NUM][HEADS][DIM_HEAD];
+	increDim(input_addr, &mid[0][0][0]);
+	nhd2hnd(&mid[0][0][0], output_addr);
+}
+
+void rearrange_hnd2n_hd(data_t* input_addr, data_t* output_addr){
+	data_t mid[INPUT_NUM][HEADS][DIM_HEAD];
+	hnd2nhd(input_addr, &mid[0][0][0]);
+	decreDim(&mid[0][0][0], output_addr);
+}
+
+void Q_KT_matmul(data_t* Q_addr, data_t* K_addr, data_t* QKT_addr){
+	//Q:HEADS, INPUT_NUM, DIM_HEAD; K:HEADS, INPUT_NUM, DIM_HEAD
+	//QKT:HEADS, INPUT_NUM, INPUT_NUM
+	data_t KT[HEADS][DIM_HEAD][INPUT_NUM];
+	data_t QKT[HEADS][INPUT_NUM][INPUT_NUM];
+	for(int i = 0; i < HEADS; i++)
+		for(int j = 0; j < DIM_HEAD; j++)
+			for(int k = 0; k < INPUT_NUM; k++){
+				KT[i][j][k] = K_addr[i*INPUT_NUM*DIM_HEAD + k*DIM_HEAD + j];
+			}
+
+	for(int i = 0; i < HEADS; i++){
+		matmul(&Q_addr[i*INPUT_NUM*DIM_HEAD], INPUT_NUM, DIM_HEAD,
+			   &KT[i][0][0], DIM_HEAD, INPUT_NUM, &QKT_addr[i*INPUT_NUM*INPUT_NUM]);
+	}
+}
+
+void QKT_V_matmul(data_t* QKT_addr, data_t* V_addr, data_t* Attn_addr){
+	//QKT:HEADS, INPUT_NUM, INPUT_NUM
+	//V:HEADS, INPUT_NUM, DIM_HEAD
+	//Attn:HEADS, INPUT_NUM, DIM_HEAD
+	for(int i = 0; i < HEADS; i++){
+		matmul(&QKT_addr[i*INPUT_NUM*INPUT_NUM], INPUT_NUM, INPUT_NUM,
+			   &V_addr[i*INPUT_NUM*DIM_HEAD], INPUT_NUM, DIM_HEAD, &Attn_addr[i*INPUT_NUM*DIM_HEAD]);
+	}
+}
+
 void Msa::forward(data_t* input_addr, data_t* output_addr){
 	data_t Q[MSA_NUM][MSA_W_DIM];
 	data_t K[MSA_NUM][MSA_W_DIM];
 	data_t V[MSA_NUM][MSA_W_DIM];
-	data_t KT[MSA_W_DIM][MSA_NUM];
-	data_t QKT[MSA_NUM][MSA_NUM];
+	data_t Qhnd[HEADS][INPUT_NUM][DIM_HEAD];
+	data_t Khnd[HEADS][INPUT_NUM][DIM_HEAD];
+	data_t Vhnd[HEADS][INPUT_NUM][DIM_HEAD];
+	data_t QKThnn[HEADS][INPUT_NUM][INPUT_NUM];
+	data_t Attn_hnd[HEADS][INPUT_NUM][DIM_HEAD];
+	data_t Attn_nhd[INPUT_NUM][HEADS][DIM_HEAD];
 	data_t Attn[MSA_NUM][MSA_W_DIM];
 
 	matmul(input_addr, MSA_NUM, MSA_IN_FEATURES, &(this->_Wq[0][0]), MSA_IN_FEATURES, MSA_W_DIM,
@@ -171,46 +299,41 @@ void Msa::forward(data_t* input_addr, data_t* output_addr){
 	matmul(input_addr, MSA_NUM, MSA_IN_FEATURES, &(this->_Wv[0][0]), MSA_IN_FEATURES, MSA_W_DIM,
 		   &V[0][0]);
 
-	for(int i = 0; i < MSA_NUM; i++)
-		for(int j = 0; j < MSA_W_DIM; j++){
-			KT[j][i] = K[i][j];
-		}
+	rearrange_n_hd2hnd(&Q[0][0], &Qhnd[0][0][0]);
+	rearrange_n_hd2hnd(&K[0][0], &Khnd[0][0][0]);
+	rearrange_n_hd2hnd(&V[0][0], &Vhnd[0][0][0]);
 
-	matmul(&Q[0][0], MSA_NUM, MSA_W_DIM, &KT[0][0], MSA_W_DIM, MSA_NUM, &QKT[0][0]);
-
-	for(int i = 0; i < MSA_NUM; i++)
-		for(int j = 0; j < MSA_NUM; j++){
-			QKT[i][j] = QKT[i][j] / this->_scale;
-		}
-
-	print_mat("QKT", &QKT[0][0], 2, 2);
-	softmax(&QKT[0][0], MSA_NUM, MSA_NUM);
-	print_mat("softmax(QKT)", &QKT[0][0], 2, 2);
-	print_mat("V", &V[0][0], 2, 3);
-
-	matmul(&QKT[0][0], MSA_NUM, MSA_NUM, &V[0][0], MSA_NUM, MSA_W_DIM, &Attn[0][0]);
-	print_mat("Attn", &Attn[0][0], MSA_NUM, MSA_W_DIM);
-
+	Q_KT_matmul(&Qhnd[0][0][0], &Khnd[0][0][0], &QKThnn[0][0][0]);
+	for(int i = 0; i < HEADS; i++)
+		for(int j = 0; j < INPUT_NUM; j++)
+			for(int k = 0; k < INPUT_NUM; k++){
+				QKThnn[i][j][k] = QKThnn[i][j][k] / this->_scale;
+			}
+	for(int i = 0; i < HEADS; i++){
+		softmax(&QKThnn[i][0][0], INPUT_NUM, INPUT_NUM);
+	}
+	QKT_V_matmul(&QKThnn[0][0][0], &Vhnd[0][0][0], &Attn_hnd[0][0][0]);
+	hnd2nhd(&Attn_hnd[0][0][0], &Attn_nhd[0][0][0]);
+	rearrange_hnd2n_hd(&Attn_hnd[0][0][0], &Attn[0][0]);
 	matmul(&Attn[0][0], MSA_NUM, MSA_W_DIM, &(this->_Wproj[0][0]), MSA_W_DIM, MSA_OUT_FEATURES,
 		   output_addr);
-
 }
 
 void msa_test(){
-	data_t X[2][4] = {{1, 2, 33, 4}, {4, 5, 9, 7}};
-	data_t Wq[4][3] = {{1, 1, 1}, {2, 2, 2}, {3, 3, 3}, {4, 4, 4}};
-	data_t Wproj[3][2] = {{1, 1}, {2, 2}, {3, 3}};
+	data_t X[4][3] = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}, {10, 11, 12}};
+	data_t Wq[3][6] = {{1, 1, 1, 2, 2, 2}, {3, 3, 3, 4, 4, 4}, {5, 5, 5, 6, 6, 6}};
+	data_t Wproj[6][4] = {{1, 1, 1, 1}, {2, 2, 2, 2}, {3, 3, 3, 3}, {4, 4, 4, 4}, {5, 5, 5, 5}, {6, 6, 6, 6}};
 
-	data_t Rs[2][2];
+	data_t Rs[4][4];
 
 	Msa msa_block = Msa("msa_block001");
-	msa_block.setWq(&Wq[0][0], 4, 3);
-	msa_block.setWk(&Wq[0][0], 4, 3);
-	msa_block.setWv(&Wq[0][0], 4, 3);
-	msa_block.setWproj(&Wproj[0][0], 3, 2);
+	msa_block.setWq(&Wq[0][0], 3, 6);
+	msa_block.setWk(&Wq[0][0], 3, 6);
+	msa_block.setWv(&Wq[0][0], 3, 6);
+	msa_block.setWproj(&Wproj[0][0], 6, 4);
 	msa_block.setScale(10000);
 	msa_block.forward(&X[0][0], &Rs[0][0]);
-	print_mat("Rs", &Rs[0][0], 2, 2);
+	print_mat("Rs", &Rs[0][0], 4, 4);
 }
 
 void TransBlock::forward(data_t* input_addr, data_t* output_addr){
@@ -246,8 +369,50 @@ void TransBlock::forward(data_t* input_addr, data_t* output_addr){
 	matadd(&X3[0][0], &X5[0][0], output_addr, MLP_NUM, MLP_OUT_FEATURES);
 }
 
+void rearrange_test(){
+	data_t input[4][6] = {{0, 1, 2, 3, 4, 5}, {8, 9, 10, 11, 12, 13},{80, 90, 100, 110, 120, 130},{81, 91, 101, 111, 121, 131}};
+	data_t mid[4][2][3];
+	data_t output[2][4][3];
+
+	increDim(&input[0][0], &mid[0][0][0]);
+	for(int i = 0; i < 4; i++)
+		for(int j = 0; j < 2; j++)
+			for(int k = 0; k < 3; k++){
+				std::cout << "mid[" << i << "][" << j <<"][" << k << "]: " << mid[i][j][k] << std::endl;
+			}
+
+	nhd2hnd(&mid[0][0][0], &output[0][0][0]);
+
+	for(int i = 0; i < 2; i++)
+		for(int j = 0; j < 4; j++)
+			for(int k = 0; k < 3; k++){
+				std::cout << "output[" << i << "][" << j <<"][" << k << "]: " << output[i][j][k] << std::endl;
+			}
+}
+
+void Q_KT_test(){
+	data_t Q_ini[4][6] = {{0, 1, 2, 3, 4, 5}, {8, 9, 10, 11, 12, 13},{80, 90, 100, 110, 120, 130},{81, 91, 101, 111, 121, 131}};
+	data_t Q_nhd[4][2][3];
+	data_t Q_hnd[2][4][3];
+
+	data_t K_ini[4][6] = {{0, 1, 2, 3, 4, 5}, {8, 9, 10, 11, 12, 13},{80, 90, 100, 110, 120, 130},{81, 91, 101, 111, 121, 131}};
+	data_t K_nhd[4][2][3];
+	data_t K_hnd[2][4][3];
+	data_t QKT[2][4][4];
+	increDim(&Q_ini[0][0], &Q_nhd[0][0][0]);
+	nhd2hnd(&Q_nhd[0][0][0], &Q_hnd[0][0][0]);
+
+	increDim(&K_ini[0][0], &K_nhd[0][0][0]);
+	nhd2hnd(&K_nhd[0][0][0], &K_hnd[0][0][0]);
+	Q_KT_matmul(&Q_hnd[0][0][0], &K_hnd[0][0][0], &QKT[0][0][0]);
+
+	print_mat_3d("QKT", &QKT[0][0][0], 2, 4, 4);
+}
+
 void vit()
 {
-	mlp_test();
+	//mlp_test();
 	msa_test();
+	//rearrange_test();
+	//Q_KT_test();
 }
