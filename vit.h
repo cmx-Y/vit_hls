@@ -1,26 +1,24 @@
 #ifndef __VIT__
 #define __VIT__
 
+#include "ap_fixed.h"
+#include "hls_math.h"
+
 #define PI 3.1415926
-#define D_MODLE 10
+
 #define INPUT_NUM 4
+#define D_MODEL 3
+#define MLP_HIDDEN_DIM 3
+#define MSA_HIDDEN_DIM 6
 #define HEADS 2
 #define DIM_HEAD 3
 
+//MSA_HIDDEN_DIM = HEADS * DIM_HEAD
 
-#define MLP_NUM 2
-#define MLP_IN_FEATURES 4
-#define MLP_HIDDEN_DIM 3
-#define MLP_OUT_FEATURES 4
+typedef ap_fixed<16, 8> data_t;
+//typedef float data_t;
 
-#define MSA_NUM 4
-#define MSA_IN_FEATURES 3
-#define MSA_W_DIM 6
-#define MSA_OUT_FEATURES 4
-
-typedef float data_t;
-
-void vit();
+void vit(data_t* input_addr, data_t* output_addr);
 
 void matmul(data_t* A_addr, int A_row, int A_col, data_t* B_addr, int B_row, int B_col,data_t* C_addr);
 void matadd(data_t* A_addr,data_t* B_addr,data_t* C_addr, int row, int col);
@@ -74,10 +72,10 @@ public:
 	}
 private:
 	str _name;
-	data_t _W0[MLP_IN_FEATURES][MLP_HIDDEN_DIM];
-	data_t _B0[MLP_NUM][MLP_HIDDEN_DIM];
-	data_t _W1[MLP_HIDDEN_DIM][MLP_OUT_FEATURES];
-	data_t _B1[MLP_NUM][MLP_OUT_FEATURES];
+	data_t _W0[D_MODEL][MLP_HIDDEN_DIM];
+	data_t _B0[INPUT_NUM][MLP_HIDDEN_DIM];
+	data_t _W1[MLP_HIDDEN_DIM][D_MODEL];
+	data_t _B1[INPUT_NUM][D_MODEL];
 };
 
 class Msa{
@@ -114,13 +112,14 @@ public:
 				_Wproj[i][j] = *(W_addr++);
 			}
 	}
+	str getName(){return _name;}
 private:
 	str _name;
 	int _scale;
-	data_t _Wq[MSA_IN_FEATURES][MSA_W_DIM];
-	data_t _Wk[MSA_IN_FEATURES][MSA_W_DIM];
-	data_t _Wv[MSA_IN_FEATURES][MSA_W_DIM];
-	data_t _Wproj[MSA_W_DIM][MSA_OUT_FEATURES];
+	data_t _Wq[D_MODEL][MSA_HIDDEN_DIM];
+	data_t _Wk[D_MODEL][MSA_HIDDEN_DIM];
+	data_t _Wv[D_MODEL][MSA_HIDDEN_DIM];
+	data_t _Wproj[MSA_HIDDEN_DIM][D_MODEL];
 };
 
 class LayerNorm{
@@ -131,6 +130,7 @@ public:
 	}
 
 	void ln(data_t* X_addr, int X_row, int X_col);
+	str getName(){return _name;}
 private:
 	data_t _gamma[10];
 	data_t _beta[10];
@@ -140,7 +140,12 @@ private:
 class TransBlock{
 public:
 	void forward(data_t* input_addr, data_t* output_addr);
+	void init();
 private:
+	LayerNorm ln0 = LayerNorm("LayerNorm0");
+	Msa msa_block = Msa("msa_block");
+	LayerNorm ln1 = LayerNorm("LayerNorm1");
+	Mlp	mlp_block = Mlp("mlp_block");
 };
  
 #endif
