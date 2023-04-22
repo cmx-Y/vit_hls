@@ -1,6 +1,7 @@
 #include "vit.h"
 #include <iostream>
 #include <assert.h>
+#include <cmath>
 
 str::str(){
 	_size = 0;
@@ -54,17 +55,21 @@ void print_mat_3d(str name, data_t* x, int dim0, int dim1, int dim2){
 }
 
 void LayerNorm::ln(data_t* X_addr, int X_row, int X_col){
+#pragma HLS ARRAY_PARTITION variable=X_addr dim=1 complete
 	data_t epsilon = 1e-8;
 	data_t X[INPUT_NUM][D_MODEL];
+#pragma HLS ARRAY_PARTITION variable=X dim=1 complete
 	data_t sum[INPUT_NUM];
 	data_t mean[INPUT_NUM];
 	data_t var[INPUT_NUM];
 
 	ln_sum_loop_i:
 	for(int i = 0; i < X_row; i++){
+#pragma HLS PIPELINE
 		sum[i] = 0;
 		ln_sum_loop_j:
 		for(int j = 0; j < X_col; j++){
+#pragma HLS UNROLL
 			sum[i] += X_addr[i*X_col + j];
 		}
 		mean[i] = sum[i] / X_col;
@@ -72,9 +77,11 @@ void LayerNorm::ln(data_t* X_addr, int X_row, int X_col){
 
 	ln_var_loop_i:
 	for(int i = 0; i < X_row; i++){
+#pragma HLS PIPELINE
 		var[i] = 0;
 		ln_var_loop_j:
 		for(int j = 0; j < X_col; j++){
+#pragma HLS UNROLL
 			var[i] += (X_addr[i*X_col + j] - mean[i]) * (X_addr[i*X_col + j] - mean[i]);
 		}
 		var[i] /= X_col;
@@ -82,15 +89,20 @@ void LayerNorm::ln(data_t* X_addr, int X_row, int X_col){
 
 	ln_rs_loop_i:
 	for(int i = 0; i < X_row; i++){
+#pragma HLS PIPELINE
 		ln_rs_loop_j:
 		for(int j = 0; j < X_col; j++){
-			X[i][j] = (X_addr[i*X_col + j] - mean[i]) / hls::sqrt(var[i] + epsilon);
+#pragma HLS UNROLL
+			X[i][j] = (X_addr[i*X_col + j] - mean[i]) / sqrt(var[i] + epsilon);
 		}
 	}
 
 	ln_2X_addr_out:
 	for(int i = 0; i < X_row; i++)
-		ln_2X_addr_inner:for(int j = 0; j < X_col; j++){
+#pragma HLS PIPELINE
+		ln_2X_addr_inner:
+		for(int j = 0; j < X_col; j++){
+#pragma HLS UNROLL
 			X_addr[i*X_col + j] = X[i][j];
 		}
 
@@ -99,28 +111,51 @@ void LayerNorm::ln(data_t* X_addr, int X_row, int X_col){
 
 data_t gelu(data_t x){
 	data_t pi = 3.1415926;
-	return (data_t)0.5 * x * ((data_t)1 + hls::tanh(hls::sqrt(2/pi) * (x + (data_t)0.044715*x*x*x)));
+	return (data_t)0.5 * x * ((data_t)1 + tanh(sqrt(2/pi) * (x + (data_t)0.044715*x*x*x)));
 }
 
-void Gelu(data_t* X_addr, int size){
-	for(int i = 0; i < size; i++){
-		*(X_addr) = gelu(*(X_addr));
-		X_addr++;
+void Gelu(data_t* X_addr, int X_row, int X_col){
+	data_t X[INPUT_NUM][MLP_HIDDEN_DIM];
+
+	Gelu_X_loop_i:
+	for (int i = 0; i < INPUT_NUM; i++)
+		Gelu_X_loop_j:
+		for (int j = 0; j < MLP_HIDDEN_DIM; j++){
+			X[i][j] = X_addr[i*X_col + j];
+		}
+
+	Gelu_loop_i:
+	for(int i = 0; i < X_row; i++){
+#pragma HLS PIPELINE
+		Gelu_loop_j:
+		for(int j = 0; j < X_col; j++){
+#pragma HLS UNROLL
+			X[i][j] = gelu(X[i][j]);
+	 	}
 	}
+
+	Gelu_Xaddr_loop_i:
+	for (int i = 0; i < INPUT_NUM; i++)
+		Gelu_Xaddr_loop_j:
+		for (int j = 0; j < MLP_HIDDEN_DIM; j++){
+			X_addr[i*X_col + j] = X[i][j];
+		}
 }
 
 void softmax(data_t* X_addr, int X_row, int X_col){
+	softmax_loop_i:
 	for(int i = 0; i < X_row; i++){
 		data_t esum = 0;
+		softmax_loop_k:
 		for(int k = 0; k < X_col; k++){
 			esum += hls::exp(X_addr[i*X_col + k]);
 		}
 
+		softmax_loop_j:
 		for(int j = 0; j < X_col; j++){
 			X_addr[i*X_col + j] = hls::exp(X_addr[i*X_col + j]) / esum;
 		}
 	}
-
 }
 
 void matmul(data_t* A_addr, int A_row, int A_col, data_t* B_addr, int B_row, int B_col,data_t* C_addr){
@@ -141,8 +176,12 @@ void matmul(data_t* A_addr, int A_row, int A_col, data_t* B_addr, int B_row, int
 }
 
 void matadd(data_t* A_addr,data_t* B_addr,data_t* C_addr, int row, int col){
+	matadd_loop_i:
 	for(int i = 0; i < row; i++)
+#pragma HLS PIPELINE
+		matadd_loop_j:
 		for(int j = 0; j < col; j++){
+#pragma HLS UNROLL
 			//C[i][j] = 0;
 			C_addr[i*col + j] = 0;
 			//C[i][j] = A[i][j] + B[i][j];
@@ -164,7 +203,7 @@ void Mlp::forward(data_t* input_addr, data_t* output_addr){
 	linear(input_addr, &(this->_W0[0][0]), &(this->_B0[0][0]), &XW0[0][0], &linear_rs0[0][0],
 		   INPUT_NUM, D_MODEL, MLP_HIDDEN_DIM);
 
-	Gelu(&linear_rs0[0][0], INPUT_NUM * D_MODEL);
+	Gelu(&linear_rs0[0][0], INPUT_NUM, MLP_HIDDEN_DIM);
 
 	linear(&linear_rs0[0][0], &(this->_W1[0][0]), &(this->_B1[0][0]), &XW1[0][0], output_addr,
 		   INPUT_NUM, MLP_HIDDEN_DIM, D_MODEL);
@@ -185,9 +224,15 @@ void nhd2hnd(data_t* nhd_addr, data_t* hnd_addr){
 	int hnd_axis0_stride = nhd_axis1_stride;
 	int hnd_axis0_size = nhd_axis1_size;
 
+	nhd2hnd_loop_i:
 	for(int i = 0; i < HEADS; i++)
+#pragma HLS PIPELINE
+		nhd2hnd_loop_j:
 		for(int j = 0; j < INPUT_NUM; j++)
+#pragma HLS PIPELINE
+			nhd2hnd_loop_k:
 			for(int k = 0; k < DIM_HEAD; k++){
+#pragma HLS UNROLL
 				hnd_addr[i*INPUT_NUM*DIM_HEAD + j*DIM_HEAD + k]
 						 = nhd_addr[i*hnd_axis0_stride + j*hnd_axis1_stride + k];
 			}
@@ -208,9 +253,15 @@ void hnd2nhd(data_t* hnd_addr, data_t* nhd_addr){
 	int nhd_axis0_stride = hnd_axis1_stride;
 	int nhd_axis0_size = hnd_axis1_size;
 
+	hnd2nhd_loop_i:
 	for(int i = 0; i < INPUT_NUM; i++)
+#pragma HLS PIPELINE
+		hnd2nhd_loop_j:
 		for(int j = 0; j < HEADS; j++)
+#pragma HLS PIPELINE
+			hnd2nhd_loop_k:
 			for(int k = 0; k < DIM_HEAD; k++){
+#pragma HLS UNROLL
 				nhd_addr[i*HEADS*DIM_HEAD + j*DIM_HEAD + k]
 						= hnd_addr[i*nhd_axis0_stride + j*nhd_axis1_stride + k];
 			}
@@ -221,9 +272,15 @@ void increDim(data_t* input_addr, data_t* output_addr){
 	int output_axis2_stride = 1;
 	int output_axis1_stride = DIM_HEAD;
 	int output_axis0_stride = HEADS * output_axis1_stride;
+	increDim_loop_i:
 	for(int i = 0; i < INPUT_NUM; i++)
+#pragma HLS PIPELINE
+		increDim_loop_j:
 		for(int j = 0; j < HEADS; j++)
+#pragma HLS PIPELINE
+			increDim_loop_k:
 			for(int k = 0; k < DIM_HEAD; k++){
+#pragma HLS UNROLL
 				output_addr[i*output_axis0_stride + j*output_axis1_stride + k]
 							= input_addr[i*output_axis0_stride + j*output_axis1_stride + k];
 			}
@@ -232,9 +289,15 @@ void increDim(data_t* input_addr, data_t* output_addr){
 void decreDim(data_t* input_addr, data_t* output_addr){
 	//n h d -> n (h d)
 
+	decreDim_loop_i:
 	for(int i = 0; i < INPUT_NUM; i++)
+#pragma HLS PIPELINE
+		decreDim_loop_j:
 		for(int j = 0; j < HEADS; j++)
+#pragma HLS PIPELINE
+			decreDim_loop_k:
 			for(int k = 0; k < DIM_HEAD; k++){
+#pragma HLS UNROLL
 				output_addr[i*HEADS*DIM_HEAD + j*DIM_HEAD + k] = input_addr[i*HEADS*DIM_HEAD + j*DIM_HEAD + k];
 			}
 }
@@ -256,9 +319,15 @@ void Q_KT_matmul(data_t* Q_addr, data_t* K_addr, data_t* QKT_addr){
 	//QKT:HEADS, INPUT_NUM, INPUT_NUM
 	data_t KT[HEADS][DIM_HEAD][INPUT_NUM];
 	data_t QKT[HEADS][INPUT_NUM][INPUT_NUM];
+	KT_loop_i:
 	for(int i = 0; i < HEADS; i++)
+#pragma HLS PIPELINE
+		KT_loop_j:
 		for(int j = 0; j < DIM_HEAD; j++)
+#pragma HLS PIPELINE
+			KT_loop_k:
 			for(int k = 0; k < INPUT_NUM; k++){
+#pragma HLS UNROLL
 				KT[i][j][k] = K_addr[i*INPUT_NUM*DIM_HEAD + k*DIM_HEAD + j];
 			}
 
@@ -302,9 +371,14 @@ void Msa::forward(data_t* input_addr, data_t* output_addr){
 	rearrange_n_hd2hnd(&V[0][0], &Vhnd[0][0][0]);
 
 	Q_KT_matmul(&Qhnd[0][0][0], &Khnd[0][0][0], &QKThnn[0][0][0]);
+	
+	divscale_loop_i:
 	for(int i = 0; i < HEADS; i++)
+		divscale_loop_j:
 		for(int j = 0; j < INPUT_NUM; j++)
+			divscale_loop_k:
 			for(int k = 0; k < INPUT_NUM; k++){
+#pragma HLS UNROLL
 				QKThnn[i][j][k] = QKThnn[i][j][k] / this->_scale;
 			}
 	for(int i = 0; i < HEADS; i++){
@@ -361,28 +435,58 @@ void msa_test(){
 }
 
 void TransBlock::init(){
-	data_t Wq[3][6] = {{1, 1, 1, 2, 2, 2}, {3, 3, 3, 4, 4, 4}, {5, 5, 5, 6, 6, 6}};
-	data_t Wproj[6][3] = {{1, 1, 1}, {2, 2, 2}, {3, 3, 3}, {4, 4, 4}, {5, 5, 5}, {6, 6, 6}};
-	this->msa_block.setWq(&Wq[0][0], 3, 6);
-	this->msa_block.setWk(&Wq[0][0], 3, 6);
-	this->msa_block.setWv(&Wq[0][0], 3, 6);
-	this->msa_block.setWproj(&Wproj[0][0], 6, 3);
+	data_t Wq[D_MODEL][MSA_HIDDEN_DIM];
+	for (int i = 0; i < D_MODEL; i++)
+		for (int j = 0; j < MSA_HIDDEN_DIM; j++){
+			Wq[i][j] = 1;
+		}
+	data_t Wproj[MSA_HIDDEN_DIM][D_MODEL];
+	for (int i = 0; i < MSA_HIDDEN_DIM; i++)
+		for (int j = 0; j < D_MODEL; j++){
+			Wproj[i][j] = 1;
+		}
+	this->msa_block.setWq(&Wq[0][0], D_MODEL, MSA_HIDDEN_DIM);
+	this->msa_block.setWk(&Wq[0][0], D_MODEL, MSA_HIDDEN_DIM);
+	this->msa_block.setWv(&Wq[0][0], D_MODEL, MSA_HIDDEN_DIM);
+	this->msa_block.setWproj(&Wproj[0][0], MSA_HIDDEN_DIM, D_MODEL);
 	this->msa_block.setScale(10000);
+	
+	data_t W0[D_MODEL][MLP_HIDDEN_DIM];
+	data_t B0[INPUT_NUM][MLP_HIDDEN_DIM];
+	data_t W1[MLP_HIDDEN_DIM][D_MODEL];
+	data_t B1[INPUT_NUM][D_MODEL];
+	for (int i = 0; i < D_MODEL; i++)
+		for (int j = 0; j < MLP_HIDDEN_DIM; j++){
+			W0[i][j] = 1;
+		}
+	for (int i = 0; i < INPUT_NUM; i++)
+		for (int j = 0; j < MLP_HIDDEN_DIM; j++){
+			B0[i][j] = 1;
+		}
+	for (int i = 0; i < MLP_HIDDEN_DIM; i++)
+		for (int j = 0; j < D_MODEL; j++){
+			W1[i][j] = 1;
+		}
+	for (int i = 0; i < INPUT_NUM; i++)
+		for (int j = 0; j < D_MODEL; j++){
+			B1[i][j] = 1;
+		}
 
-	data_t W0[3][3] = {{1, 1, 1}, {2, 2, 2}, {3, 3, 3}};
-	data_t B0[4][3] = {{3, 2, 1}, {3, 2, 1}, {3, 2, 1}, {3, 2, 1}};
-	data_t W1[3][3] = {{2, 2, 2}, {1, 1, 1}, {3, 3, 3}};
-	data_t B1[4][3] = {{3, 2, 3}, {3, 2, 3}, {3, 2, 3}, {3, 2, 3}};
-	this->mlp_block.setW0(&W0[0][0], 3, 3);
-	this->mlp_block.setB0(&B0[0][0], 4, 3);
-	this->mlp_block.setW1(&W1[0][0], 3, 3);
-	this->mlp_block.setB1(&B1[0][0], 4, 3);
+	this->mlp_block.setW0(&W0[0][0], D_MODEL, MLP_HIDDEN_DIM);
+	this->mlp_block.setB0(&B0[0][0], INPUT_NUM, MLP_HIDDEN_DIM);
+	this->mlp_block.setW1(&W1[0][0], MLP_HIDDEN_DIM, D_MODEL);
+	this->mlp_block.setB1(&B1[0][0], INPUT_NUM, D_MODEL);
 }
 
 void TransBlock::forward(data_t* input_addr, data_t* output_addr){
 	data_t X0[INPUT_NUM][D_MODEL];
+	
+	trans_block_X0_loop_i:
 	for(int i = 0; i < INPUT_NUM; i++)
+#pragma HLS PIPELINE
+		trans_block_X0_loop_j:
 		for(int j = 0; j < D_MODEL; j++){
+#pragma HLS UNROLL
 			X0[i][j] = input_addr[i*D_MODEL + j];
 		}
 
@@ -396,8 +500,13 @@ void TransBlock::forward(data_t* input_addr, data_t* output_addr){
 	matadd(&X0[0][0], &X2[0][0], &X3[0][0], INPUT_NUM, D_MODEL);
 
 	data_t X4[INPUT_NUM][D_MODEL];
+	
+	trans_block_X32X4_loop_i:
 	for(int i = 0; i < INPUT_NUM; i++)
+#pragma HLS PIPELINE
+		trans_block_X32X4_loop_j:
 		for(int j = 0; j < D_MODEL; j++){
+#pragma HLS UNROLL
 			X4[i][j] = X3[i][j];
 		}
 	

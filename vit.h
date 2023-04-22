@@ -7,16 +7,16 @@
 #define PI 3.1415926
 
 #define INPUT_NUM 4
-#define D_MODEL 3
-#define MLP_HIDDEN_DIM 3
-#define MSA_HIDDEN_DIM 6
-#define HEADS 2
-#define DIM_HEAD 3
+#define D_MODEL 24
+#define MLP_HIDDEN_DIM 12
+#define MSA_HIDDEN_DIM 24
+#define HEADS 4
+#define DIM_HEAD 6
 
 //MSA_HIDDEN_DIM = HEADS * DIM_HEAD
 
-typedef ap_fixed<16, 8> data_t;
-//typedef float data_t;
+//typedef ap_fixed<16, 8> data_t;
+typedef float data_t;
 
 void vit(data_t* input_addr, data_t* output_addr);
 
