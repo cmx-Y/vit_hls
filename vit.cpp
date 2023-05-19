@@ -55,10 +55,9 @@ void print_mat_3d(str name, data_t* x, int dim0, int dim1, int dim2){
 }
 
 void LayerNorm::ln(data_t* X_addr, int X_row, int X_col){
-#pragma HLS ARRAY_PARTITION variable=X_addr dim=1 complete
 	data_t epsilon = 1e-8;
 	data_t X[INPUT_NUM][D_MODEL];
-#pragma HLS ARRAY_PARTITION variable=X dim=1 complete
+#pragma HLS ARRAY_PARTITION variable=X dim=2 factor=4 block
 	data_t sum[INPUT_NUM];
 	data_t mean[INPUT_NUM];
 	data_t var[INPUT_NUM];
@@ -194,19 +193,96 @@ void linear(data_t* X_addr, data_t* W_addr, data_t* B_addr, data_t* XW_addr, dat
 	matadd(XW_addr, B_addr, Rs_addr, sample_num, out_features);
 }
 
+void mlpmatmul1(data_t* A_addr, data_t* B_addr, data_t* C_addr){
+	data_t A[INPUT_NUM][D_MODEL];
+#pragma HLS ARRAY_RESHAPE variable=A dim=2 factor=16 block
+	data_t B[D_MODEL][MLP_HIDDEN_DIM];
+#pragma HLS ARRAY_RESHAPE variable=B dim=1 factor=16 block
+	data_t C[INPUT_NUM][MLP_HIDDEN_DIM];
+
+	for(int i = 0; i < INPUT_NUM; i++)
+		for(int j = 0; j < D_MODEL; j++){
+			A[i][j] = A_addr[i*D_MODEL + j];
+		}
+
+	for(int i = 0; i < D_MODEL; i++)
+		for(int j = 0; j < MLP_HIDDEN_DIM; j++){
+			B[i][j] = B_addr[i*MLP_HIDDEN_DIM + j];
+		}
+
+	for(int i = 0; i < INPUT_NUM; i++)
+		for(int j = 0; j < MLP_HIDDEN_DIM; j++){
+			C[i][j] = 0;
+		}
+
+	mlpmatmul1_i_loop:
+	for(int i = 0; i < INPUT_NUM; i++)
+		mlpmatmul1_j_loop:
+		for(int j = 0; j < MLP_HIDDEN_DIM; j++){
+#pragma HLS PIPELINE
+			mlpmatmul1_k_loop:
+			for(int k = 0; k < D_MODEL; k++){
+				C[i][j] += A[i][k] * B[k][j];
+			}
+		}
+
+	for(int i = 0; i < INPUT_NUM; i++)
+		for(int j = 0; j < MLP_HIDDEN_DIM; j++){
+			C_addr[i*MLP_HIDDEN_DIM + j] = C[i][j];
+		}
+}
+
+void mlpmatmul2(data_t* A_addr, data_t* B_addr, data_t* C_addr){
+	data_t A[INPUT_NUM][MLP_HIDDEN_DIM];
+#pragma HLS ARRAY_RESHAPE variable=A dim=2 factor=16 block
+	data_t B[MLP_HIDDEN_DIM][D_MODEL];
+#pragma HLS ARRAY_RESHAPE variable=B dim=1 factor=16 block
+	data_t C[INPUT_NUM][D_MODEL];
+
+	for(int i = 0; i < INPUT_NUM; i++)
+		for(int j = 0; j < MLP_HIDDEN_DIM; j++){
+			A[i][j] = A_addr[i*MLP_HIDDEN_DIM + j];
+		}
+
+	for(int i = 0; i < MLP_HIDDEN_DIM; i++)
+		for(int j = 0; j < D_MODEL; j++){
+			B[i][j] = B_addr[i*D_MODEL + j];
+		}
+
+	for(int i = 0; i < INPUT_NUM; i++)
+		for(int j = 0; j < D_MODEL; j++){
+			C[i][j] = 0;
+		}
+
+	mlpmatmul1_i_loop:
+	for(int i = 0; i < INPUT_NUM; i++)
+		mlpmatmul1_j_loop:
+		for(int j = 0; j < D_MODEL; j++){
+#pragma HLS PIPELINE
+			mlpmatmul1_k_loop:
+			for(int k = 0; k < MLP_HIDDEN_DIM; k++){
+				C[i][j] += A[i][k] * B[k][j];
+			}
+		}
+
+	for(int i = 0; i < INPUT_NUM; i++)
+		for(int j = 0; j < D_MODEL; j++){
+			C_addr[i*MLP_HIDDEN_DIM + j] = C[i][j];
+		}
+}
+
 void Mlp::forward(data_t* input_addr, data_t* output_addr){
 	data_t XW0[INPUT_NUM][MLP_HIDDEN_DIM];
 	data_t XW1[INPUT_NUM][D_MODEL];
 	data_t linear_rs0[INPUT_NUM][MLP_HIDDEN_DIM];
 
-
-	linear(input_addr, &(this->_W0[0][0]), &(this->_B0[0][0]), &XW0[0][0], &linear_rs0[0][0],
-		   INPUT_NUM, D_MODEL, MLP_HIDDEN_DIM);
+	mlpmatmul1(input_addr, &(this->_W0[0][0]), &XW0[0][0]);
+	matadd(&XW0[0][0], &(this->_B0[0][0]), &linear_rs0[0][0], INPUT_NUM, MLP_HIDDEN_DIM);
 
 	Gelu(&linear_rs0[0][0], INPUT_NUM, MLP_HIDDEN_DIM);
 
-	linear(&linear_rs0[0][0], &(this->_W1[0][0]), &(this->_B1[0][0]), &XW1[0][0], output_addr,
-		   INPUT_NUM, MLP_HIDDEN_DIM, D_MODEL);
+	mlpmatmul2(&linear_rs0[0][0], &(this->_W1[0][0]), &XW1[0][0]);
+	matadd(&XW1[0][0], &(this->_B1[0][0]), output_addr, INPUT_NUM, D_MODEL);
 }
 
 void nhd2hnd(data_t* nhd_addr, data_t* hnd_addr){
@@ -337,13 +413,28 @@ void Q_KT_matmul(data_t* Q_addr, data_t* K_addr, data_t* QKT_addr){
 	}
 }
 
+void qktvmatmul(data_t* A_addr, data_t* B_addr, data_t* C_addr){
+
+	qktvmatmul_i_loop:
+	for(int i = 0; i < INPUT_NUM; i++)
+		qktvmatmul_j_loop:
+		for(int j = 0; j < DIM_HEAD; j++){
+#pragma HLS PIPELINE
+			C_addr[i*DIM_HEAD + j] = 0;
+			qktvmatmul_k_loop:
+			for(int k = 0; k < INPUT_NUM; k++){
+#pragma HLS UNROLL
+				C_addr[i*DIM_HEAD + j] += A_addr[i*INPUT_NUM + k] * B_addr[k*DIM_HEAD + j];
+			}
+		}
+}
+
 void QKT_V_matmul(data_t* QKT_addr, data_t* V_addr, data_t* Attn_addr){
 	//QKT:HEADS, INPUT_NUM, INPUT_NUM
 	//V:HEADS, INPUT_NUM, DIM_HEAD
 	//Attn:HEADS, INPUT_NUM, DIM_HEAD
 	for(int i = 0; i < HEADS; i++){
-		matmul(&QKT_addr[i*INPUT_NUM*INPUT_NUM], INPUT_NUM, INPUT_NUM,
-			   &V_addr[i*INPUT_NUM*DIM_HEAD], INPUT_NUM, DIM_HEAD, &Attn_addr[i*INPUT_NUM*DIM_HEAD]);
+		qktvmatmul(&QKT_addr[i*INPUT_NUM*INPUT_NUM], &V_addr[i*INPUT_NUM*DIM_HEAD], &Attn_addr[i*INPUT_NUM*DIM_HEAD]);
 	}
 }
 
